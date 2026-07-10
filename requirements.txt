@@ -1,0 +1,19 @@
+# API service dependencies. torch is installed separately in Dockerfile.api
+# from the CPU wheel index to keep the image CPU-only and small.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.8
+pydantic-settings>=2.3
+python-multipart>=0.0.9
+redis>=5.0
+chromadb>=0.5.5
+litellm>=1.80
+python-jose[cryptography]>=3.3
+PyMuPDF>=1.24
+sentence-transformers>=3.0
+transformers>=4.44
+rank-bm25>=0.2.2
+httpx>=0.27
+slowapi>=0.1.9
+pytest>=8.2
+pytest-asyncio>=0.23
