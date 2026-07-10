@@ -9,7 +9,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.extension import _rate_limit_exceeded_handler
 
 from api.deps import limiter
-from api.routes import auth, documents, health, ingest, sessions
+from api.routes import auth, chat, documents, health, ingest, sessions
 from core.config import settings
 from core.index import IndexStore
 from core.logging import setup_logging
@@ -47,5 +47,6 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(health.router, tags=["health"])
 app.include_router(auth.router, tags=["auth"])
 app.include_router(sessions.router, tags=["sessions"])
+app.include_router(chat.router, tags=["chat"])
 app.include_router(ingest.router, tags=["ingest"])
 app.include_router(documents.router, tags=["documents"])
