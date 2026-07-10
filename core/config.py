@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     embedding_device: str = "cpu"  # cuda for local dev only; Docker submission is CPU-only
     embed_batch_size: int = 8
+    eager_load_models: bool = True  # disabled in unit tests to avoid model downloads
 
     # --- optional local Ollama fallback (never used in the Docker submission) ---
     ollama_fallback_enabled: bool = False
