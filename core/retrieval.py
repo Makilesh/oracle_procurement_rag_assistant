@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from core import metrics
 from core.config import settings
 from core.index import IndexStore
 from core.logging import log_stage
@@ -66,11 +67,13 @@ async def retrieve(index: IndexStore, query: str) -> list[RetrievedChunk]:
     started = time.perf_counter()
     query_embedding = (await embed_texts([query]))[0]
     embed_ms = round((time.perf_counter() - started) * 1000)
+    metrics.STAGE_LATENCY.labels("embed").observe(embed_ms / 1000)
 
     search_started = time.perf_counter()
     dense = await run_in_embed_pool(index.dense_search_sync, query_embedding, settings.dense_top_k)
     sparse = await run_in_embed_pool(index.sparse_search_sync, query, settings.sparse_top_k)
     search_ms = round((time.perf_counter() - search_started) * 1000)
+    metrics.STAGE_LATENCY.labels("search").observe(search_ms / 1000)
 
     by_id: dict[str, dict[str, Any]] = {}
     for candidate in dense + sparse:
@@ -86,8 +89,9 @@ async def retrieve(index: IndexStore, query: str) -> list[RetrievedChunk]:
     rerank_started = time.perf_counter()
     scores = await rerank_pairs(query, [c["text"] for c in candidates])
     rerank_ms = round((time.perf_counter() - rerank_started) * 1000)
+    metrics.STAGE_LATENCY.labels("rerank").observe(rerank_ms / 1000)
 
-    scored = sorted(zip(candidates, scores), key=lambda pair: pair[1], reverse=True)
+    scored = sorted(zip(candidates, scores, strict=True), key=lambda pair: pair[1], reverse=True)
     passing = [(c, s) for c, s in scored if s >= settings.min_rerank_score]
     kept_pairs, diversified = select_with_document_diversity(passing, settings.final_top_k)
     kept = [

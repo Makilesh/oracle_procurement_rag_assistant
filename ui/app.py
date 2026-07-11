@@ -7,7 +7,8 @@ collapsible block under each answer → visible session badge + New Conversation
 import json
 import os
 import uuid
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 import gradio as gr
 import httpx
