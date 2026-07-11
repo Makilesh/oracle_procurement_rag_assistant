@@ -1,0 +1,91 @@
+[
+  {
+    "id": "richmond-thresholds",
+    "turns": ["What are the competitive bidding thresholds at the University of Richmond?"],
+    "expected_answer_keywords": ["10,000", "125,000"],
+    "expected_source_filename": "richmond_procurement_policy.pdf",
+    "expected_pages": [4]
+  },
+  {
+    "id": "richmond-capital-equipment",
+    "turns": ["What qualifies as capital equipment in the Richmond procurement policy and what is its minimum purchase price?"],
+    "expected_answer_keywords": ["5,000"],
+    "expected_source_filename": "richmond_procurement_policy.pdf",
+    "expected_pages": [2]
+  },
+  {
+    "id": "richmond-card-invoice",
+    "turns": ["Can a University of Richmond purchase card be used to pay an invoice?"],
+    "expected_answer_keywords": ["accounts payable"],
+    "expected_source_filename": "richmond_procurement_policy.pdf",
+    "expected_pages": [7]
+  },
+  {
+    "id": "richmond-tech-purchases",
+    "turns": ["Which department manages technology purchases such as hardware and software at the University of Richmond?"],
+    "expected_answer_keywords": ["information services"],
+    "expected_source_filename": "richmond_procurement_policy.pdf",
+    "expected_pages": [7]
+  },
+  {
+    "id": "oracle-order-vs-requisition",
+    "turns": ["What is the difference between an order and a requisition in Oracle Procurement?"],
+    "expected_answer_keywords": ["authorization", "request"],
+    "expected_source_filename": "oracle_fusion_using_procurement_26b.pdf",
+    "expected_pages": [162, 218]
+  },
+  {
+    "id": "oracle-po-types",
+    "turns": ["What purchase order types does Oracle Purchasing provide?"],
+    "expected_answer_keywords": ["blanket", "contract"],
+    "expected_source_filename": "oracle_fusion_using_procurement_26b.pdf",
+    "expected_pages": [218]
+  },
+  {
+    "id": "oracle-requisition-lifecycle",
+    "turns": ["What does the requisition life cycle refer to in Oracle Procurement?"],
+    "expected_answer_keywords": ["paid"],
+    "expected_source_filename": "oracle_fusion_using_procurement_26b.pdf",
+    "expected_pages": [197]
+  },
+  {
+    "id": "oracle-reassign-requisition",
+    "turns": ["Can I reassign a requisition that was created by someone else in Oracle Procurement?"],
+    "expected_answer_keywords": ["reassign"],
+    "expected_source_filename": "oracle_fusion_using_procurement_26b.pdf",
+    "expected_pages": [196, 197]
+  },
+  {
+    "id": "multiturn-oracle-requisition",
+    "turns": [
+      "What is a purchase requisition in Oracle Procurement?",
+      "What statuses can it have during approval?"
+    ],
+    "expected_answer_keywords": ["approved"],
+    "expected_source_filename": "oracle_fusion_using_procurement_26b.pdf",
+    "expected_pages": [202, 203, 206]
+  },
+  {
+    "id": "multiturn-richmond-thresholds",
+    "turns": [
+      "What are the competitive bid thresholds in the University of Richmond procurement policy?",
+      "What is required for purchases above the highest threshold?"
+    ],
+    "expected_answer_keywords": ["bid"],
+    "expected_source_filename": "richmond_procurement_policy.pdf",
+    "expected_pages": [4, 5]
+  },
+  {
+    "id": "cross-doc-approval-limit",
+    "turns": ["What is the approval limit for purchases?"],
+    "expected_answer_keywords": [],
+    "expected_source_filename": "richmond_procurement_policy.pdf",
+    "expected_pages": [4, 7]
+  },
+  {
+    "id": "out-of-scope-refusal",
+    "turns": ["What is the capital of France?"],
+    "expected_answer_keywords": [],
+    "expect_refusal": true
+  }
+]

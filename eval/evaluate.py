@@ -94,17 +94,36 @@ async def run_evaluation(index: IndexStore, store: SessionStore) -> dict[str, An
         turns: list[str] = entry["turns"]
         session_id = f"eval-{qid}-{uuid.uuid4().hex[:6]}"
         logger.info("eval %d/%d: %s", i, len(testset), qid)
-
-        # prior turns (multi-turn pairs) run through the full chat pipeline
-        for prior in turns[:-1]:
-            await chat_once(index, store, session_id, prior)
-            total_calls += 2  # condense (maybe) + answer; conservative count
-
         final_question = turns[-1]
-        answer, sources, context_text, calls = await _answer_final_turn(
-            index, store, session_id, final_question
-        )
-        total_calls += calls
+
+        try:
+            # prior turns (multi-turn pairs) run through the full chat pipeline
+            for prior in turns[:-1]:
+                await chat_once(index, store, session_id, prior)
+                total_calls += 2  # condense (maybe) + answer; conservative count
+
+            answer, sources, context_text, calls = await _answer_final_turn(
+                index, store, session_id, final_question
+            )
+            total_calls += calls
+        except Exception:
+            # One bad question (quota blip, transient upstream error) must not
+            # kill the suite — mark it unscored and keep going.
+            logger.warning("eval question %s failed, marking unscored", qid, exc_info=True)
+            per_question.append(
+                {
+                    "id": qid,
+                    "question": final_question,
+                    "multi_turn": len(turns) > 1,
+                    "hit": None,
+                    "answer_relevance": None,
+                    "faithfulness": None,
+                    "answer": "",
+                    "notes": "unscored (question failed: quota or upstream error)",
+                }
+            )
+            await store.delete(session_id)
+            continue
 
         expected_file = entry.get("expected_source_filename")
         expect_refusal = entry.get("expect_refusal", False)
