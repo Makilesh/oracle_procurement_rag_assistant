@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal
 
-from core import prompts
+from core import metrics, prompts
 from core.config import settings
 from core.index import IndexStore
 from core.llm import QuotaExceededError, complete, response_text, stream_deltas
@@ -117,6 +117,7 @@ async def condense_query(history: list[Turn], message: str) -> str:
         condensed = response_text(response).strip().strip('"').splitlines()[0].strip()
         if not condensed or len(condensed) > 300:
             return message
+        metrics.STAGE_LATENCY.labels("condense").observe(time.perf_counter() - started)
         log_stage(
             logger,
             "condensed query",
@@ -190,7 +191,9 @@ async def chat_once(
         await persist_turn(store, session_id, message, answer, [], prepared.condensed_query)
         return answer, []
 
+    generate_started = time.perf_counter()
     response = await complete("main", prepared.messages, timeout=45.0)
+    metrics.STAGE_LATENCY.labels("generate").observe(time.perf_counter() - generate_started)
     answer = response_text(response)
     await persist_turn(store, session_id, message, answer, prepared.sources, prepared.condensed_query)
     log_stage(
@@ -225,6 +228,7 @@ async def chat_stream(
         async for delta in stream_deltas(stream):
             if first_token_ms is None:
                 first_token_ms = round((time.perf_counter() - started) * 1000)
+                metrics.STAGE_LATENCY.labels("first_token").observe(first_token_ms / 1000)
             collected.append(delta)
             yield {"delta": delta}
     except QuotaExceededError:

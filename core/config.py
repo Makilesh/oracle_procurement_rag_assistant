@@ -41,7 +41,10 @@ class Settings(BaseSettings):
     rpm_cheap: int = 15
     rpd_cheap: int = 500
     embedding_model: str = "BAAI/bge-m3"
-    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    # Benchmarked on this corpus: identical hit rate to BAAI/bge-reranker-v2-m3
+    # at ~25x lower CPU latency (150-250ms vs ~5s per query in-container).
+    # Swap back to the bge reranker for GPU dev via RERANKER_MODEL.
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     embedding_device: str = "cpu"  # cuda for local dev only; Docker submission is CPU-only
     embed_batch_size: int = 8
     eager_load_models: bool = True  # disabled in unit tests to avoid model downloads

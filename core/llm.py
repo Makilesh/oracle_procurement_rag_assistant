@@ -17,6 +17,7 @@ from typing import Any, AsyncIterator, Literal
 
 import litellm
 
+from core import metrics
 from core.config import settings
 
 logger = logging.getLogger("llm")
@@ -223,10 +224,11 @@ async def complete(
                 await budget_for(model, key_index).acquire()
             except DailyBudgetExceeded:
                 logger.warning("daily budget spent for %s key[%d]; rotating", model, key_index)
+                metrics.LLM_CALLS.labels(model, "day_budget_spent").inc()
                 rate_limited = True
                 continue
             try:
-                return await _acompletion(
+                response = await _acompletion(
                     model,
                     messages=messages,
                     stream=stream,
@@ -234,14 +236,18 @@ async def complete(
                     api_key=key or None,
                     **kwargs,
                 )
+                metrics.LLM_CALLS.labels(model, "ok").inc()
+                return response
             except Exception as exc:
                 if _is_rate_limit(exc):
                     logger.warning("upstream 429 from %s key[%d]; rotating", model, key_index)
+                    metrics.LLM_CALLS.labels(model, "rate_limited").inc()
                     rate_limited = True
                     continue
                 if first_error is None:
                     first_error = exc
                 logger.warning("model %s failed (%s); next model", model, type(exc).__name__)
+                metrics.LLM_CALLS.labels(model, "error").inc()
                 break  # non-quota errors repeat on every key — skip to next model
 
     if settings.ollama_fallback_enabled:
@@ -255,6 +261,7 @@ async def complete(
             **kwargs,
         )
     if rate_limited or first_error is None:
+        metrics.LLM_QUOTA_EXHAUSTED.inc()
         raise QuotaExceededError("LLM quota exceeded, retry shortly")
     raise first_error
 
