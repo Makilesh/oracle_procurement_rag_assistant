@@ -5,7 +5,14 @@ Chroma is the single source of truth. It runs either as a dedicated service
 (local dev, unit tests). Everything the api keeps locally is a derived cache
 that can be rebuilt from Chroma alone: the BM25 index (re-pickled on every
 ingest/delete) and the docs registry (docs.json; recovered by scanning chunk
-metadata if the cache is missing) — so api instances are effectively stateless.
+metadata if the cache is missing) — so a fresh api instance needs nothing but
+Chroma to come up.
+
+Single-instance constraint: these caches are refreshed only by the process
+that served the ingest/delete, and the ingest lock is per-process. Running
+multiple api replicas would serve stale sparse results after an ingest until
+restart — add cross-replica invalidation (e.g. Redis pub/sub) before scaling
+out.
 """
 
 import asyncio

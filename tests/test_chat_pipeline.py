@@ -1,12 +1,13 @@
 """Chat pipeline tests with mocked LLM and mocked retrieval."""
 
+import asyncio
 from typing import Any
 
 import pytest
 
 import core.chat_pipeline as pipeline
 from core import prompts
-from core.chat_pipeline import chat_once, prepare_turn, route_small_talk
+from core.chat_pipeline import chat_once, chat_stream, prepare_turn, route_small_talk
 from core.retrieval import RetrievedChunk
 from core.sessions import SessionStore
 from tests.test_sessions import FakeRedis
@@ -151,6 +152,42 @@ async def test_rag_answer_persists_turn_with_sources(monkeypatch: pytest.MonkeyP
     assert history is not None
     assert history[-1]["role"] == "assistant"
     assert history[-1]["sources"][0]["tag"] == "S1"
+
+
+async def test_stream_disconnect_salvages_partial_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Closing the stream generator mid-answer (client disconnect) must still
+    persist the user message and the partial answer."""
+    store = make_store()
+
+    async def fake_retrieve(index: Any, query: str) -> list[RetrievedChunk]:
+        return [make_chunk()]
+
+    async def fake_complete(role: str, messages: Any, **kwargs: Any) -> Any:
+        return object()  # opaque stream handle; stream_deltas is patched below
+
+    async def fake_stream_deltas(stream: Any) -> Any:
+        yield "The workflow "
+        yield "has three steps"
+        await asyncio.Event().wait()  # never finishes — disconnect happens here
+
+    monkeypatch.setattr(pipeline, "retrieve", fake_retrieve)
+    monkeypatch.setattr(pipeline, "complete", fake_complete)
+    monkeypatch.setattr(pipeline, "stream_deltas", fake_stream_deltas)
+
+    gen = chat_stream(None, store, "s1", "what is the PO approval workflow?")
+    deltas = [(await anext(gen))["delta"], (await anext(gen))["delta"]]
+    assert deltas == ["The workflow ", "has three steps"]
+
+    await gen.aclose()  # simulates the client going away mid-stream
+    if pipeline._salvage_tasks:
+        await asyncio.gather(*list(pipeline._salvage_tasks))
+
+    history = await store.history("s1")
+    assert history is not None and len(history) == 2
+    assert history[0]["role"] == "user"
+    assert history[1]["role"] == "assistant"
+    assert history[1]["content"] == "The workflow has three steps"
+    assert history[1]["sources"][0]["tag"] == "S1"
 
 
 async def test_small_talk_persisted_and_no_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:

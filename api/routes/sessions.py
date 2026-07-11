@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from api.deps import get_current_user
 from api.schemas import DeletedResponse, HistoryResponse
-from core.sessions import SessionStore
+from core.sessions import SessionStore, scoped_session_id
 
 router = APIRouter()
 
@@ -17,7 +17,7 @@ async def session_history(
     request: Request,
     user: str = Depends(get_current_user),
 ) -> HistoryResponse:
-    turns = await _store(request).history(session_id)
+    turns = await _store(request).history(scoped_session_id(user, session_id))
     if turns is None:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}")
     return HistoryResponse(session_id=session_id, turns=turns)
@@ -29,7 +29,7 @@ async def delete_session(
     request: Request,
     user: str = Depends(get_current_user),
 ) -> DeletedResponse:
-    deleted = await _store(request).delete(session_id)
+    deleted = await _store(request).delete(scoped_session_id(user, session_id))
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}")
     return DeletedResponse()

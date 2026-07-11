@@ -15,6 +15,14 @@ from core.config import settings
 Turn = dict[str, Any]
 
 
+def scoped_session_id(user: str, session_id: str) -> str:
+    """Namespace a client-supplied session id under the authenticated JWT
+    subject, so no user can read, continue, or delete another user's
+    conversation by guessing its id (IDOR guard). Routes translate ids at the
+    boundary; clients keep seeing the raw id they sent."""
+    return f"{user}:{session_id}"
+
+
 def _estimate_tokens(text: str) -> int:
     """Fast approximation (~4 chars/token) for the history budget."""
     return max(1, len(text) // 4)
