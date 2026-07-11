@@ -58,15 +58,12 @@ footer { display: none !important; }
 .message details li { margin: 6px 0; }
 .thinking { opacity: 0.65; font-style: italic; }
 .latency-note { opacity: 0.5; font-size: 0.8em; }
+#chat-window { height: 62vh !important; min-height: 420px; }
 """
 
 
 def _new_session_id() -> str:
     return uuid.uuid4().hex[:12]
-
-
-def _badge(session_id: str) -> str:
-    return f"🪪 **Session:** `{session_id}`"
 
 
 def _clean_section(path: str) -> str:
@@ -102,7 +99,7 @@ def _sources_block(sources: list[dict[str, Any]]) -> str:
 
 def login(username: str, password: str) -> tuple[Any, ...]:
     def fail(msg: str) -> tuple[Any, ...]:
-        return None, "", gr.update(visible=True), gr.update(visible=False), f"⚠️ {msg}", ""
+        return None, "", [], gr.update(visible=True), gr.update(visible=False), f"⚠️ {msg}", gr.update()
 
     if not username or not password:
         return fail("Enter username and password.")
@@ -120,12 +117,49 @@ def login(username: str, password: str) -> tuple[Any, ...]:
         return fail(f"Login failed ({resp.status_code}).")
     token = resp.json()["access_token"]
     session_id = _new_session_id()
-    return token, session_id, gr.update(visible=False), gr.update(visible=True), "", _badge(session_id)
+    return (
+        token,
+        session_id,
+        [session_id],
+        gr.update(visible=False),
+        gr.update(visible=True),
+        "",
+        gr.update(choices=[session_id], value=session_id),
+    )
 
 
-def new_conversation() -> tuple[str, list[Message], str]:
+def new_conversation(sessions: list[str]) -> tuple[str, list[str], list[Message], Any]:
     session_id = _new_session_id()
-    return session_id, [], _badge(session_id)
+    sessions = [session_id] + [s for s in (sessions or []) if s != session_id]
+    return session_id, sessions, [], gr.update(choices=sessions, value=session_id)
+
+
+def switch_session(session_id: str, token: str | None, sessions: list[str]) -> tuple[str, list[str], list[Message]]:
+    """Load a previous conversation's full history from the backend
+    (sessions live in Redis, so anything ever chatted is recoverable —
+    you can even paste an old session id from a previous login)."""
+    session_id = (session_id or "").strip()
+    if not token or not session_id:
+        return session_id, sessions or [], []
+    if session_id not in (sessions or []):
+        sessions = [session_id] + (sessions or [])
+    messages: list[Message] = []
+    try:
+        resp = httpx.get(
+            f"{API_URL}/sessions/{session_id}/history",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            for turn in resp.json()["turns"]:
+                content = turn.get("content", "")
+                if turn.get("role") == "assistant" and turn.get("sources"):
+                    content += _sources_block(turn["sources"])
+                messages.append({"role": turn.get("role", "assistant"), "content": content})
+        # 404 = a fresh session with no turns yet — an empty chat is correct
+    except httpx.HTTPError:
+        messages = [{"role": "assistant", "content": "⚠️ Could not load this session's history."}]
+    return session_id, sessions, messages
 
 
 def _stream_worker(payload: dict[str, Any], token: str, events: "queue.Queue") -> None:
@@ -260,14 +294,23 @@ def build_app() -> gr.Blocks:
             login_btn = gr.Button("Log in", variant="primary")
             login_error = gr.Markdown("")
 
+        sessions_state = gr.State([])
+
         with gr.Column(visible=False) as chat_panel:
             with gr.Row(elem_id="session-row"):
-                session_badge = gr.Markdown("")
+                session_picker = gr.Dropdown(
+                    choices=[],
+                    label="🪪 Session",
+                    scale=3,
+                    allow_custom_value=True,  # paste an old session id to restore it
+                    info="Switch back to a previous conversation — history is kept server-side",
+                )
                 new_btn = gr.Button("🔄 New Conversation", scale=0, size="sm")
             chatbot = gr.Chatbot(
-                height=520,
+                height="62vh",
                 show_label=False,
                 placeholder=WELCOME,
+                elem_id="chat-window",
             )
             with gr.Row():
                 msg_box = gr.Textbox(
@@ -279,10 +322,25 @@ def build_app() -> gr.Blocks:
                 send_btn = gr.Button("Send ➤", variant="primary", scale=1)
             gr.Examples(examples=[[q] for q in EXAMPLE_QUESTIONS], inputs=[msg_box], label="Try asking")
 
-        login_outputs = [token_state, session_state, login_panel, chat_panel, login_error, session_badge]
+        login_outputs = [
+            token_state, session_state, sessions_state,
+            login_panel, chat_panel, login_error, session_picker,
+        ]
         login_btn.click(login, inputs=[username, password], outputs=login_outputs)
         password.submit(login, inputs=[username, password], outputs=login_outputs)
-        new_btn.click(new_conversation, outputs=[session_state, chatbot, session_badge])
+
+        new_btn.click(
+            new_conversation,
+            inputs=[sessions_state],
+            outputs=[session_state, sessions_state, chatbot, session_picker],
+        )
+        # .input fires only on USER interaction, not on programmatic updates —
+        # so New Conversation doesn't trigger a spurious history reload.
+        session_picker.input(
+            switch_session,
+            inputs=[session_picker, token_state, sessions_state],
+            outputs=[session_state, sessions_state, chatbot],
+        )
 
         chat_inputs = [msg_box, chatbot, token_state, session_state]
         send_btn.click(respond, inputs=chat_inputs, outputs=[chatbot, msg_box])
