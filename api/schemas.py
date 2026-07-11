@@ -61,6 +61,19 @@ class HistoryResponse(BaseModel):
     turns: list[Turn]
 
 
+class SessionInfo(BaseModel):
+    owner: str | None = Field(None, description="JWT subject; None for legacy unscoped sessions")
+    session_id: str
+    key: str = Field(description="Exact storage id — admins can pass it to /sessions/{key}/history")
+    turns: int
+    created_at: float | None = None
+    updated_at: float | None = None
+
+
+class SessionsListResponse(BaseModel):
+    sessions: list[SessionInfo]
+
+
 class DeletedResponse(BaseModel):
     deleted: bool = True
 

@@ -33,6 +33,22 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     return str(subject)
 
 
+def is_admin(user: str) -> bool:
+    admins = {u.strip() for u in settings.admin_usernames.split(",") if u.strip()}
+    return user in admins
+
+
+async def get_admin_user(user: str = Depends(get_current_user)) -> str:
+    """Admin gate on top of JWT auth. 403 — not 401 — because the caller IS
+    authenticated, just not authorized for this endpoint."""
+    if not is_admin(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+    return user
+
+
 def _rate_limit_key(request: Request) -> str:
     """Rate-limit per JWT subject when authenticated, else per client IP."""
     auth = request.headers.get("Authorization", "")

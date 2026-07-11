@@ -84,3 +84,29 @@ class SessionStore:
     async def delete(self, session_id: str) -> bool:
         removed = await self._redis.delete(self._key(session_id), self._meta_key(session_id))
         return removed > 0
+
+    async def list_sessions(self) -> list[Turn]:
+        """Admin view: every stored session with owner, turn count and
+        timestamps, newest activity first. Uses SCAN (never KEYS) so a large
+        keyspace can't block Redis."""
+        sessions: list[Turn] = []
+        async for key in self._redis.scan_iter(match="session:*", count=500):
+            if key.endswith(":meta"):
+                continue
+            raw = key[len("session:"):]
+            owner, _, sid = raw.partition(":")
+            if not sid:  # legacy key from before per-user scoping — no owner
+                owner, sid = None, raw  # type: ignore[assignment]
+            meta = await self._redis.hgetall(f"{key}:meta")
+            sessions.append(
+                {
+                    "owner": owner,
+                    "session_id": sid,
+                    "key": raw,
+                    "turns": await self._redis.llen(key),
+                    "created_at": float(meta["created_at"]) if meta.get("created_at") else None,
+                    "updated_at": float(meta["updated_at"]) if meta.get("updated_at") else None,
+                }
+            )
+        sessions.sort(key=lambda s: s["updated_at"] or 0.0, reverse=True)
+        return sessions

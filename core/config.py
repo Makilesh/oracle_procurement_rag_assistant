@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     jwt_ttl_minutes: int = 60
     demo_username: str = "demo"
     demo_password: str = "demo123"
+    # JWT subjects allowed to call admin endpoints (comma-separated).
+    # Non-admins get 403 — authenticated but not authorized.
+    admin_usernames: str = "demo"
 
     # --- services ---
     api_port: int = 8000
