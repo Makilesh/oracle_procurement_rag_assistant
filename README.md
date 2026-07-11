@@ -21,30 +21,36 @@ limit?" means different things in each):
 ## Architecture
 
 ```
-                ┌─────────────────────────────────────────────────────┐
-                │                    docker-compose                    │
-                │                                                      │
- Browser ──────▶│  Gradio UI (7860)                                    │
-                │      │  HTTP (login → JWT, SSE chat stream)          │
-                │      ▼                                               │
-                │  FastAPI api (8000)                                  │
-                │   ├─ /auth/token ── JWT (HS256, python-jose)         │
-                │   ├─ /chat ─┬─ small-talk router (rule-based)        │
-                │   │         ├─ condense follow-up (Gemini flash-lite)│
-                │   │         ├─ retrieve: bge-m3 dense (Chroma)       │
-                │   │         │           + BM25 sparse → RRF fusion   │
-                │   │         │           → bge-reranker → gate        │
-                │   │         └─ answer: Gemini 3.5 Flash (streamed)   │
-                │   ├─ /ingest, /documents ── PyMuPDF → heading-aware  │
-                │   │         chunking → embed → Chroma + BM25         │
-                │   └─ /sessions, /evaluate, /health                   │
-                │      │                    │                          │
-                │      ▼                    ▼                          │
-                │  Redis (sessions,     ChromaDB (embedded,            │
-                │   AOF, volume)         chroma_data volume)           │
-                └─────────────────────────────────────────────────────┘
-   Named volumes: redis_data, chroma_data, hf_cache (model cache)
-   Bind mount: ./prebuilt_index (read-only bootstrap, see below)
+             ┌──────────────────────────────────────────────────────────────┐
+             │                        docker-compose                        │
+             │                                                              │
+ Browser ───▶│  Gradio UI (7860)                                            │
+             │      │  HTTP (login → JWT, SSE chat stream)                  │
+             │      ▼                                                       │
+             │  FastAPI api (8000)  ← stateless: all durable state lives    │
+             │   │                    in Redis + Chroma; local files are    │
+             │   │                    rebuildable caches (BM25, registry)   │
+             │   ├─ /auth/token ── JWT (HS256, python-jose)                 │
+             │   ├─ /chat ─┬─ small-talk router (rule-based)                │
+             │   │         ├─ condense follow-up (Gemini flash-lite)        │
+             │   │         ├─ retrieve: bge-m3 dense + BM25 sparse          │
+             │   │         │     → RRF fusion → cross-encoder rerank        │
+             │   │         │     → confidence gate + doc-diversity guard    │
+             │   │         └─ answer: Gemini 3.5 Flash (streamed), with     │
+             │   │              per-(model,key) budgets + fallback chain    │
+             │   ├─ /ingest, /documents ── PyMuPDF → heading-aware chunking │
+             │   ├─ /sessions, /evaluate, /health                           │
+             │   └─ /metrics ── Prometheus (requests, RAG stages, budgets)  │
+             │      │                     │                                 │
+             │      ▼                     ▼                                 │
+             │  Redis                 ChromaDB service (dedicated           │
+             │  (sessions AOF +       container, chroma_data volume)        │
+             │   durable RPD budgets)     ▲                                 │
+             │                        index-init (seeds volume once from    │
+             │                         ./prebuilt_index, read-only)         │
+             └──────────────────────────────────────────────────────────────┘
+   Named volumes: redis_data, chroma_data, api_state (caches), hf_cache (models)
+   CI: GitHub Actions — ruff lint + unit tests on every push/PR
 ```
 
 ## Prerequisites
@@ -162,11 +168,27 @@ with `Retry-After` · `503` LLM quota exhausted (clean JSON detail, never a stac
   chunk text only, so BM25 matches both forms.
 - **Retrieval — hybrid + rerank + confidence gate.** Dense (bge-m3/Chroma) top-12 and BM25
   top-12 are fused with rank-only RRF (k=60; raw scores are never mixed — scale mismatch),
-  then the top-10 are reranked by a cross-encoder instantiated with a sigmoid activation
-  (bge rerankers emit raw logits by default, which silently breaks thresholds). Top-4
-  chunks with score ≥ 0.25 survive. If none do, the chatbot **refuses honestly** instead
-  of calling the LLM with empty context. The reranker model is env-swappable
-  (`RERANKER_MODEL`) with zero code changes.
+  then the top-10 are reranked by a cross-encoder with sigmoid activation (rerankers emit
+  raw logits by default, which silently breaks thresholds). Top-4 chunks with score ≥ 0.25
+  survive, with a **document-diversity guard** ensuring both documents are represented when
+  both clear the gate. If nothing passes, the chatbot **refuses honestly** instead of
+  calling the LLM with empty context.
+- **Reranker — benchmarked, not assumed.** The CPU default is
+  `cross-encoder/ms-marco-MiniLM-L-6-v2`: on this corpus it matched
+  `BAAI/bge-reranker-v2-m3` exactly on hit rate (93%) and judge scores while cutting
+  rerank latency from ~5s to **~130–250ms** per query in-container — turning the whole
+  retrieval path into ~250ms. The heavier bge reranker remains one env var away
+  (`RERANKER_MODEL`) for GPU environments.
+- **Stateless api over stateful services.** Chroma runs as its own service (client/server,
+  image pinned to the client version) and Redis holds sessions plus durable daily LLM
+  budgets — so the api container keeps no state it can't rebuild (its BM25 index and doc
+  registry are derived caches, recovered by scanning Chroma metadata). This is what makes
+  `docker compose up --scale api=2` a config change rather than a re-architecture.
+- **Observability.** `/metrics` exposes Prometheus counters/histograms: requests by route
+  template and status, per-stage RAG latency (embed/search/rerank/condense/first-token/
+  generate), LLM calls by model and outcome (ok / rate-limited / budget-spent / error),
+  and a quota-exhaustion counter — the exact signals you'd alert on in production.
+- **CI.** GitHub Actions runs ruff lint + the unit suite on every push and PR.
 - **LLM — Gemini via LiteLLM.** Answers use `gemini/gemini-3.5-flash`; condensation and
   judging use `gemini/gemini-3.1-flash-lite`. LiteLLM abstracts the provider, so switching
   to OpenAI/Anthropic/Ollama is a one-line env change. The wrapper enforces free-tier RPM
@@ -195,9 +217,11 @@ with `Retry-After` · `503` LLM quota exhausted (clean JSON detail, never a stac
 ### Cold-start bootstrap (`prebuilt_index/`)
 
 Embedding the 670-page Oracle guide on an unknown CPU takes several minutes and would look
-like a hang on first run. The repo ships the prebuilt Chroma + BM25 artifacts; on startup
-the api uses (in order): existing volume → copy of `prebuilt_index/` → full ingestion of
-`/data` (background, logged). The prebuilt index is **only** a first-boot optimization —
+like a hang on first run. The repo ships the prebuilt Chroma + BM25 artifacts; the
+`index-init` compose service seeds the Chroma volume from `prebuilt_index/` exactly once
+(skipped when the volume is already initialized), the api recovers its doc registry by
+scanning chunk metadata, and if nothing seeded the index at all it falls back to full
+ingestion of `/data` (background, logged). The prebuilt index is **only** a first-boot optimization —
 the full lifecycle works through the API alone: delete all documents, re-upload via
 `/ingest`, and the rebuilt index behaves identically (covered by an integration test).
 
