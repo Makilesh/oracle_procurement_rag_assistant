@@ -224,12 +224,13 @@ curl http://localhost:8000/evaluate -H "Authorization: Bearer $TOKEN"
 
 ### Results
 
-Run of 2026-07-11 — answers on the default `gemini-3.5-flash` chain, judged by the
-held-out `gemini-2.5-flash` with the strict rubric (29 LLM calls, 271s):
+Final run of 2026-07-11 — **15 questions**, answers on the default `gemini-3.5-flash`
+chain, judged by the held-out `gemini-2.5-flash` with the strict rubric (35 LLM calls,
+558s through the free-tier rate limiter):
 
-- **Hit Rate:** 91% (10/11 scored questions; the refusal question is excluded by design)
-- **Answer Relevance (1–5, strict judge):** 4.5
-- **Faithfulness (1–5, strict judge):** 4.92
+- **Hit Rate:** 93% (13/14 scored questions; the refusal question is excluded by design)
+- **Answer Relevance (1–5, strict judge):** 4.67
+- **Faithfulness (1–5, strict judge):** 4.8
 - **Keyword Coverage (objective, no LLM):** 100%
 
 | # | Question | Multi-turn | Hit | Relevance | Faithfulness | Keywords | Notes |
@@ -242,15 +243,22 @@ held-out `gemini-2.5-flash` with the strict rubric (29 LLM calls, 271s):
 | oracle-po-types | What purchase order types does Oracle Purchasing provide? |  | ✅ | 5 | 5 | 100% |  |
 | oracle-requisition-lifecycle | What does the requisition life cycle refer to in Oracle Procurement? |  | ✅ | 5 | 5 | 100% |  |
 | oracle-reassign-requisition | Can I reassign a requisition created by someone else in Oracle Procurement? |  | ✅ | 5 | 5 | 100% |  |
-| multiturn-oracle-requisition | What statuses can it have during approval? | yes | ✅ | **3** | 5 | 100% | partial answer — see failure #1 |
-| multiturn-richmond-thresholds | What is required for purchases above the highest threshold? | yes | ✅ | 4 | 5 | 100% |  |
-| cross-doc-approval-limit | What is the approval limit for purchases? |  | ❌ | 5 | **4** | — | unsupported claim flagged — see failure #2 |
-| out-of-scope-refusal | What is the capital of France? |  | — | 2 | 5 | — | refused correctly (low relevance is the *correct* outcome for a refusal) |
+| richmond-sole-vs-single-source | What is the difference between sole source and single source? |  | ✅ | 5 | 5 | 100% |  |
+| oracle-blanket-purchase-agreement | What is a blanket purchase agreement and when would you use one? |  | ✅ | 5 | 5 | 100% |  |
+| oracle-supplier-registration | How does the supplier registration process work in Oracle Procurement? |  | ✅ | 5 | 5 | 100% |  |
+| multiturn-oracle-requisition | What statuses can it have during approval? | yes | ✅ | 5 | 5 | 100% | fixed by the condensation constraint — see failure #1 |
+| multiturn-richmond-thresholds | What is required for purchases above the highest threshold? | yes | ✅ | 3 | 4 | 100% | judge caught "must contact" where the policy says "encouraged to contact" |
+| cross-doc-approval-limit | What is the approval limit for purchases? |  | ❌ | 5 | 5 | — | attribution fixed by the diversity guard — see failure #2 |
+| out-of-scope-refusal | What is the capital of France? |  | — | 2 | 3 | — | refused correctly (a refusal *should* score low on relevance; the judge even counts the canned refusal wording as "claims") |
 
 The score variance (3s, 4s, a 2) is the strict held-out judge working as intended — an
 earlier run with a lenient same-model judge returned a uniform 5.0 across the board,
 which is why the rubric was calibrated ("5 is rare", claim-by-claim grounding check)
-and the judge moved to a model that never generates the answers.
+and the judge moved to a model that never generates the answers. Its precision shows in
+`multiturn-richmond-thresholds`: the answer said departments *"must contact"* the
+Procurement Office for purchases over $125,000 where the policy says they are
+*"encouraged to contact"* — exactly the modality drift a faithfulness judge exists to
+catch.
 
 ### Failure analysis
 
@@ -270,9 +278,13 @@ the answer matched the *retrieved* chunks, but they were the wrong chunks. The f
 document-approval statuses into what should have been a requisition-specific list, i.e. the
 drift persists in softer form even when page-level retrieval succeeds.
 **Hypothesis:** condensation should paraphrase minimally; every token it invents becomes a
-high-weight retrieval term. **Fix I'd ship:** constrain the condensation prompt to reuse
-only words from the conversation plus the resolved entity (or apply a section-path filter
-derived from the previous turn's sources, biasing follow-ups to stay in the same chapter).
+high-weight retrieval term. **Fix shipped and validated:** the condensation prompt now
+forbids introducing topic words — it may only reuse conversation vocabulary plus the noun
+a pronoun resolves to. In the final run the condensed query came out as *"purchase
+requisition statuses during approval Oracle Procurement"* (no invented "workflow"), the
+right pages were retrieved, and the question scored **5/5 relevance** (previously ❌ hit /
+3/5). A section-path filter biasing follow-ups toward the previous turn's chapter remains
+the next-step hardening.
 
 **2. Retrieval failure — cross-document ambiguity (cross-doc-approval-limit).**
 *"What is the approval limit for purchases?"* has no single answer: Richmond defines
@@ -280,13 +292,17 @@ dollar thresholds ($10k/$125k) while the Oracle guide discusses approval routing
 signature authority. Retrieval confidence collapsed (top rerank score 0.452 vs ~0.99 on
 well-posed questions; only 3 of 10 candidates cleared the 0.25 gate) and the kept chunks
 missed the expected Richmond threshold pages. The retriever mixed both documents rather
-than surfacing the policy table, and the strict judge additionally flagged an unsupported
-cross-document attribution in the answer (faithfulness 4/5) — mixing sources invites the
-model to blur which document says what. **Hypothesis:** ambiguous, entity-free queries
-dilute both dense and sparse signals across documents. **Fix I'd ship:** a document-scope clarifier —
-when top-1 rerank confidence is low and results span both documents, ask the user which
-context they mean (Oracle software workflow vs. university policy), or answer both
-explicitly per document.
+than surfacing the policy table, and in one run the strict judge flagged an unsupported
+cross-document attribution (faithfulness 4/5) — mixing sources invites the model to blur
+which document says what. **Hypothesis:** ambiguous, entity-free queries dilute both dense
+and sparse signals across documents. **Partial fix shipped:** a document-diversity guard —
+when both documents clear the confidence gate, the second document is guaranteed a slot in
+the context instead of one document monopolizing it. In the final run the answer correctly
+presented both perspectives and faithfulness recovered to **5/5**; the page-level hit still
+misses (the specific threshold table isn't in the top-4), so the question stays ❌ by the
+strict hit metric. **Remaining fix I'd ship:** a document-scope clarifier — when top-1
+rerank confidence is low and results span both documents, ask the user which context they
+mean (Oracle software workflow vs. university policy).
 
 **Bonus observation — the confidence gate works:** the out-of-scope question ("capital of
 France") retrieved 0 chunks above the 0.25 threshold (top score 0.0) and produced the
