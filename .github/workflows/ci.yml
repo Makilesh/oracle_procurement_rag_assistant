@@ -17,10 +17,10 @@ jobs:
           cache: pip
 
       - name: Install CPU torch first (keeps the resolver off CUDA wheels)
-        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+        run: pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install dependencies
-        run: pip install -r requirements.txt ruff
+        run: pip install -r requirements-dev.txt
 
       - name: Lint (ruff)
         run: ruff check .
