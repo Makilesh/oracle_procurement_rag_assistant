@@ -6,7 +6,13 @@ import litellm
 import pytest
 
 import core.llm as llm_module
-from core.llm import QuotaExceededError, SlidingWindowLimiter, call_structured, complete
+from core.llm import (
+    DailyBudgetExceeded,
+    ModelBudget,
+    QuotaExceededError,
+    call_structured,
+    complete,
+)
 
 
 class FakeMessage:
@@ -37,18 +43,35 @@ def make_fake_acompletion(responses: list[Any]):
     return fake, calls
 
 
-async def test_limiter_allows_up_to_rpm() -> None:
-    limiter = SlidingWindowLimiter(rpm=3)
+@pytest.fixture(autouse=True)
+def fresh_budgets(monkeypatch: pytest.MonkeyPatch):
+    """Isolate budget state and pin a single known fallback per test."""
+    llm_module._budgets.clear()
+    monkeypatch.setattr(llm_module.settings, "model_fallbacks", "gemini/fallback-model")
+    yield
+    llm_module._budgets.clear()
+
+
+async def test_budget_allows_up_to_rpm() -> None:
+    budget = ModelBudget(rpm=3, rpd=100)
     for _ in range(3):
-        await asyncio.wait_for(limiter.acquire(), timeout=0.5)
+        await asyncio.wait_for(budget.acquire(), timeout=0.5)
 
 
-async def test_limiter_blocks_when_full() -> None:
-    limiter = SlidingWindowLimiter(rpm=2)
-    await limiter.acquire()
-    await limiter.acquire()
+async def test_budget_blocks_when_minute_full() -> None:
+    budget = ModelBudget(rpm=2, rpd=100)
+    await budget.acquire()
+    await budget.acquire()
     with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(limiter.acquire(), timeout=0.2)
+        await asyncio.wait_for(budget.acquire(), timeout=0.2)
+
+
+async def test_budget_raises_when_day_spent() -> None:
+    budget = ModelBudget(rpm=10, rpd=2)
+    await budget.acquire()
+    await budget.acquire()
+    with pytest.raises(DailyBudgetExceeded):
+        await budget.acquire()
 
 
 async def test_call_structured_strips_fences(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,26 +105,44 @@ def _rate_limit_error() -> litellm.RateLimitError:
     return litellm.RateLimitError(message="quota", llm_provider="gemini", model="x")
 
 
-async def test_complete_raises_quota_after_double_429(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake, calls = make_fake_acompletion([_rate_limit_error(), _rate_limit_error()])
+async def test_complete_falls_back_on_429(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake, calls = make_fake_acompletion([_rate_limit_error(), FakeResponse("answer")])
     monkeypatch.setattr(llm_module, "_acompletion", fake)
-
-    async def instant_sleep(_: float) -> None:
-        pass
-
-    monkeypatch.setattr(llm_module.asyncio, "sleep", instant_sleep)
-    with pytest.raises(QuotaExceededError):
-        await complete("main", [{"role": "user", "content": "hi"}])
-    assert len(calls) == 2
-
-
-async def test_complete_recovers_after_single_429(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake, _ = make_fake_acompletion([_rate_limit_error(), FakeResponse("answer")])
-    monkeypatch.setattr(llm_module, "_acompletion", fake)
-
-    async def instant_sleep(_: float) -> None:
-        pass
-
-    monkeypatch.setattr(llm_module.asyncio, "sleep", instant_sleep)
     response = await complete("main", [{"role": "user", "content": "hi"}])
     assert response.choices[0].message.content == "answer"
+    assert calls[0]["model"] == llm_module.settings.model_main
+    assert calls[1]["model"] == "gemini/fallback-model"
+
+
+async def test_complete_quota_error_when_whole_chain_429s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake, calls = make_fake_acompletion([_rate_limit_error(), _rate_limit_error()])
+    monkeypatch.setattr(llm_module, "_acompletion", fake)
+    with pytest.raises(QuotaExceededError):
+        await complete("main", [{"role": "user", "content": "hi"}])
+    assert len(calls) == 2  # primary + one fallback, no endless retries
+
+
+async def test_complete_skips_model_with_spent_daily_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake, calls = make_fake_acompletion([FakeResponse("from fallback")])
+    monkeypatch.setattr(llm_module, "_acompletion", fake)
+    # exhaust the primary's daily budget client-side
+    primary = llm_module.settings.model_main
+    llm_module._budgets[primary] = ModelBudget(rpm=10, rpd=1)
+    await llm_module._budgets[primary].acquire()
+
+    response = await complete("main", [{"role": "user", "content": "hi"}])
+    assert response.choices[0].message.content == "from fallback"
+    assert [c["model"] for c in calls] == ["gemini/fallback-model"]
+
+
+async def test_complete_surfaces_non_quota_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    boom = ValueError("bad request shape")
+    fake, calls = make_fake_acompletion([boom, boom])
+    monkeypatch.setattr(llm_module, "_acompletion", fake)
+    with pytest.raises(ValueError, match="bad request shape"):
+        await complete("main", [{"role": "user", "content": "hi"}])
+    assert len(calls) == 2  # tried the chain, then surfaced the real error
