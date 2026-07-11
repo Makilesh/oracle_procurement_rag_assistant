@@ -155,7 +155,11 @@ with `Retry-After` · `503` LLM quota exhausted (clean JSON detail, never a stac
   named volume means multi-turn context survives `docker-compose down && up`.
 - **Auth — JWT over API key.** `/auth/token` issues HS256 JWTs (python-jose) checked by a
   FastAPI dependency; integrates with Swagger's Authorize button via the OAuth2 password
-  flow (the endpoint accepts both JSON and form bodies). Secrets only via `.env`.
+  flow (the endpoint accepts both JSON and form bodies). Secrets only via `.env`; the api
+  **fails fast at startup** if `JWT_SECRET` is a known placeholder or shorter than 16
+  characters, and credentials are checked with constant-time compares. Sessions are
+  **namespaced per JWT subject** server-side (`session:{user}:{id}`), so one user can
+  never read, continue, or delete another user's conversation by guessing its id.
 - **Follow-up handling — query condensation.** With non-empty history, the cheap model
   rewrites "what about its approval limit?" into a standalone query ("purchase requisition
   approval limit") before retrieval. 3s budget, graceful fallback to the raw message.
@@ -179,11 +183,13 @@ with `Retry-After` · `503` LLM quota exhausted (clean JSON detail, never a stac
   rerank latency from ~5s to **~130–250ms** per query in-container — turning the whole
   retrieval path into ~250ms. The heavier bge reranker remains one env var away
   (`RERANKER_MODEL`) for GPU environments.
-- **Stateless api over stateful services.** Chroma runs as its own service (client/server,
-  image pinned to the client version) and Redis holds sessions plus durable daily LLM
+- **Thin api over stateful services.** Chroma runs as its own service (client/server,
+  image pinned to the pip client version) and Redis holds sessions plus durable daily LLM
   budgets — so the api container keeps no state it can't rebuild (its BM25 index and doc
-  registry are derived caches, recovered by scanning Chroma metadata). This is what makes
-  `docker compose up --scale api=2` a config change rather than a re-architecture.
+  registry are derived caches, recovered by scanning Chroma metadata). One honest caveat:
+  those caches refresh only in the process that served the ingest/delete, so the design is
+  **single api instance** today — scaling out would need cross-replica cache invalidation
+  (e.g. Redis pub/sub) and Redis-based RPM pacing, which is deliberately out of scope.
 - **Observability.** `/metrics` exposes Prometheus counters/histograms: requests by route
   template and status, per-stage RAG latency (embed/search/rerank/condense/first-token/
   generate), LLM calls by model and outcome (ok / rate-limited / budget-spent / error),
@@ -335,6 +341,7 @@ honest refusal path with zero LLM calls wasted on hallucination.
 ## Tests
 
 ```bash
+pip install -r requirements-dev.txt                      # test/lint tooling (not in the Docker images)
 .venv/Scripts/python -m pytest tests -q -m "not slow"   # unit tests (no API needed)
 .venv/Scripts/python -m pytest tests -q -m slow          # live document-lifecycle test (needs compose up)
 ```
