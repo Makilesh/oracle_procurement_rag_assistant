@@ -12,6 +12,7 @@ import os
 import re
 import time
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Literal
 
 import litellm
@@ -52,20 +53,79 @@ def _is_rate_limit(exc: Exception) -> bool:
     return "429" in text or "RESOURCE_EXHAUSTED" in text or "Too Many Requests" in text
 
 
-class ModelBudget:
-    """Per-model RPM + RPD budget: asyncio lock + deques of monotonic stamps.
-    RPM pacing sleeps until the minute window rolls over (lock RELEASED before
-    sleeping so one sleeper never serializes concurrent requests). A spent RPD
-    budget raises DailyBudgetExceeded immediately — waiting hours makes no
-    sense when a fallback model is available. The day window is rolling 24h
-    (process-local), a conservative approximation of Google's calendar-day."""
+class DailyCounter:
+    """Durable RPD accounting in Redis, keyed (model#key, Google-reset date).
+    Counts survive api restarts and are shared across replicas. If Redis is
+    unreachable (unit tests, bare local runs) it degrades to an in-process
+    rolling 24h window — same semantics, weaker durability."""
 
-    def __init__(self, rpm: int, rpd: int) -> None:
+    def __init__(self) -> None:
+        self._redis: Any = None
+        self._disabled_until = 0.0
+        self._fallback: dict[str, deque[float]] = {}
+        self._lock = asyncio.Lock()
+
+    def _client(self) -> Any:
+        if self._redis is None:
+            from redis.asyncio import from_url
+
+            self._redis = from_url(settings.redis_url, decode_responses=True)
+        return self._redis
+
+    @staticmethod
+    def _date() -> str:
+        """Google free-tier quotas reset at midnight Pacific."""
+        try:
+            from zoneinfo import ZoneInfo
+
+            return datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y%m%d")
+        except Exception:
+            return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=-8))).strftime(
+                "%Y%m%d"
+            )
+
+    async def within_budget(self, slot: str, limit: int) -> bool:
+        """Atomically count one request against the slot's daily budget.
+        INCR-first is deliberately conservative: rejected attempts inflate the
+        count slightly rather than ever under-counting."""
+        if time.monotonic() >= self._disabled_until:
+            key = f"llm_rpd:{slot}:{self._date()}"
+            try:
+                client = self._client()
+                count = await client.incr(key)
+                if count == 1:
+                    await client.expire(key, 26 * 3600)
+                return count <= limit
+            except Exception:
+                logger.warning("redis unavailable for rpd accounting; using in-process fallback")
+                self._disabled_until = time.monotonic() + 60.0
+        async with self._lock:
+            now = time.monotonic()
+            window = self._fallback.setdefault(slot, deque())
+            while window and now - window[0] > 86400.0:
+                window.popleft()
+            if len(window) >= limit:
+                return False
+            window.append(now)
+            return True
+
+
+_daily = DailyCounter()
+
+
+class ModelBudget:
+    """Per-(model, key) budget. RPM pacing is in-process (asyncio lock + deque
+    of monotonic stamps; the lock is RELEASED before sleeping so one sleeper
+    never serializes concurrent requests). RPD accounting is durable in Redis
+    via DailyCounter; a spent RPD budget raises DailyBudgetExceeded immediately
+    — waiting hours makes no sense when a fallback model is available."""
+
+    def __init__(self, slot: str, rpm: int, rpd: int) -> None:
+        self.slot = slot
         self.rpm = rpm
         self.rpd = rpd
         self._lock = asyncio.Lock()
         self._minute: deque[float] = deque()
-        self._day: deque[float] = deque()
 
     async def _try_acquire(self) -> float | None:
         """None = acquired; float = seconds to wait; raises when RPD is spent."""
@@ -73,15 +133,12 @@ class ModelBudget:
             now = time.monotonic()
             while self._minute and now - self._minute[0] > 60.0:
                 self._minute.popleft()
-            while self._day and now - self._day[0] > 86400.0:
-                self._day.popleft()
-            if len(self._day) >= self.rpd:
-                raise DailyBudgetExceeded
-            if len(self._minute) < self.rpm:
-                self._minute.append(now)
-                self._day.append(now)
-                return None
-            return 60.0 - (now - self._minute[0]) + 0.05
+            if len(self._minute) >= self.rpm:
+                return 60.0 - (now - self._minute[0]) + 0.05
+            self._minute.append(now)
+        if await _daily.within_budget(self.slot, self.rpd):
+            return None
+        raise DailyBudgetExceeded
 
     async def acquire(self) -> None:
         while True:
@@ -129,7 +186,7 @@ def budget_for(model: str, key_index: int) -> ModelBudget:
             rpm, rpd = settings.rpm_main, settings.rpd_main
         elif model == settings.model_cheap:
             rpm, rpd = settings.rpm_cheap, settings.rpd_cheap
-        _budgets[slot] = ModelBudget(rpm, rpd)
+        _budgets[slot] = ModelBudget(slot, rpm, rpd)
     return _budgets[slot]
 
 

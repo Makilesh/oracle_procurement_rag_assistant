@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from typing import Any
 
 import litellm
@@ -45,8 +46,12 @@ def make_fake_acompletion(responses: list[Any]):
 
 @pytest.fixture(autouse=True)
 def fresh_budgets(monkeypatch: pytest.MonkeyPatch):
-    """Isolate budget state; pin one fallback model and one api key per test."""
+    """Isolate budget state; pin one fallback model and one api key per test.
+    Daily accounting is forced onto the in-process fallback (no Redis in unit
+    tests) and its counters are reset so tests can't leak into each other."""
     llm_module._budgets.clear()
+    monkeypatch.setattr(llm_module._daily, "_disabled_until", time.monotonic() + 3600)
+    monkeypatch.setattr(llm_module._daily, "_fallback", {})
     monkeypatch.setattr(llm_module.settings, "model_fallbacks", "gemini/fallback-model")
     monkeypatch.setattr(llm_module.settings, "gemini_api_keys", "key-a")
     yield
@@ -54,13 +59,13 @@ def fresh_budgets(monkeypatch: pytest.MonkeyPatch):
 
 
 async def test_budget_allows_up_to_rpm() -> None:
-    budget = ModelBudget(rpm=3, rpd=100)
+    budget = ModelBudget("test-a", rpm=3, rpd=100)
     for _ in range(3):
         await asyncio.wait_for(budget.acquire(), timeout=0.5)
 
 
 async def test_budget_blocks_when_minute_full() -> None:
-    budget = ModelBudget(rpm=2, rpd=100)
+    budget = ModelBudget("test-b", rpm=2, rpd=100)
     await budget.acquire()
     await budget.acquire()
     with pytest.raises(asyncio.TimeoutError):
@@ -68,7 +73,7 @@ async def test_budget_blocks_when_minute_full() -> None:
 
 
 async def test_budget_raises_when_day_spent() -> None:
-    budget = ModelBudget(rpm=10, rpd=2)
+    budget = ModelBudget("test-c", rpm=10, rpd=2)
     await budget.acquire()
     await budget.acquire()
     with pytest.raises(DailyBudgetExceeded):
@@ -132,7 +137,7 @@ async def test_complete_skips_model_with_spent_daily_budget(
     monkeypatch.setattr(llm_module, "_acompletion", fake)
     # exhaust the primary's daily budget client-side (single key -> index 0)
     primary = f"{llm_module.settings.model_main}#0"
-    llm_module._budgets[primary] = ModelBudget(rpm=10, rpd=1)
+    llm_module._budgets[primary] = ModelBudget(primary, rpm=10, rpd=1)
     await llm_module._budgets[primary].acquire()
 
     response = await complete("main", [{"role": "user", "content": "hi"}])
