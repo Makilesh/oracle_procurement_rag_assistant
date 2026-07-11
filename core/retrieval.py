@@ -27,6 +27,31 @@ class RetrievedChunk:
     score: float  # sigmoid-normalized rerank score in [0, 1]
 
 
+Passing = tuple[dict[str, Any], float]  # (candidate, rerank score)
+
+
+def select_with_document_diversity(
+    passing: list[Passing], top_k: int
+) -> tuple[list[Passing], bool]:
+    """Take the top_k gate-passing candidates, but if BOTH documents cleared
+    the confidence gate, guarantee the second document is represented instead
+    of letting one document monopolize the context (prevents answers silently
+    merging or ignoring one source on ambiguous cross-document queries)."""
+    kept = passing[:top_k]
+    kept_files = {c["metadata"].get("source_filename") for c, _ in kept}
+    other_doc = next(
+        (
+            (c, s)
+            for c, s in passing[top_k:]
+            if c["metadata"].get("source_filename") not in kept_files
+        ),
+        None,
+    )
+    if other_doc is not None and len(kept) == top_k:
+        return kept[:-1] + [other_doc], True
+    return kept, False
+
+
 def rrf_fuse(rankings: list[list[str]], k: int) -> list[str]:
     """Reciprocal-rank fusion over id rankings; deduplicates across lists."""
     scores: dict[str, float] = {}
@@ -63,10 +88,11 @@ async def retrieve(index: IndexStore, query: str) -> list[RetrievedChunk]:
     rerank_ms = round((time.perf_counter() - rerank_started) * 1000)
 
     scored = sorted(zip(candidates, scores), key=lambda pair: pair[1], reverse=True)
+    passing = [(c, s) for c, s in scored if s >= settings.min_rerank_score]
+    kept_pairs, diversified = select_with_document_diversity(passing, settings.final_top_k)
     kept = [
         RetrievedChunk(id=c["id"], text=c["text"], metadata=c["metadata"], score=s)
-        for c, s in scored[: settings.final_top_k]
-        if s >= settings.min_rerank_score
+        for c, s in kept_pairs
     ]
     log_stage(
         logger,
@@ -76,6 +102,7 @@ async def retrieve(index: IndexStore, query: str) -> list[RetrievedChunk]:
         sparse=len(sparse),
         candidates=len(candidates),
         kept=len(kept),
+        diversified=diversified,
         top_score=round(scored[0][1], 3) if scored else None,
         embed_ms=embed_ms,
         search_ms=search_ms,
