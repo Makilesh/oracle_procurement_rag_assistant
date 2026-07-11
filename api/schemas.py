@@ -83,6 +83,7 @@ class EvalQuestionResult(BaseModel):
     hit: bool | None = None
     answer_relevance: float | None = None
     faithfulness: float | None = None
+    keyword_coverage: float | None = None
     notes: str = ""
 
 
@@ -90,6 +91,7 @@ class EvalResponse(BaseModel):
     hit_rate: float
     answer_relevance: float
     faithfulness: float
+    keyword_coverage: float
     llm_calls: int
     per_question: list[EvalQuestionResult]
     extra: dict[str, Any] = {}

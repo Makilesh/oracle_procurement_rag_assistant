@@ -20,6 +20,7 @@ async def evaluate(request: Request, user: str = Depends(get_current_user)) -> E
         hit_rate=summary["hit_rate"],
         answer_relevance=summary["answer_relevance"],
         faithfulness=summary["faithfulness"],
+        keyword_coverage=summary["keyword_coverage"],
         llm_calls=summary["llm_calls"],
         per_question=[
             EvalQuestionResult(
@@ -28,6 +29,7 @@ async def evaluate(request: Request, user: str = Depends(get_current_user)) -> E
                 hit=q["hit"],
                 answer_relevance=q["answer_relevance"],
                 faithfulness=q["faithfulness"],
+                keyword_coverage=q["keyword_coverage"],
                 notes=q["notes"],
             )
             for q in summary["per_question"]
