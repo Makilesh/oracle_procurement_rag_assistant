@@ -39,6 +39,15 @@ class QuotaExceededError(Exception):
     """LLM quota exhausted after retries (routes map this to a clean 503)."""
 
 
+def _is_rate_limit(exc: Exception) -> bool:
+    """Provider 429s don't always surface as litellm.RateLimitError (e.g.
+    VertexAIError wrapping a raw 429), so also match on the error text."""
+    if isinstance(exc, litellm.RateLimitError):
+        return True
+    text = str(exc)
+    return "429" in text or "RESOURCE_EXHAUSTED" in text or "Too Many Requests" in text
+
+
 class SlidingWindowLimiter:
     """Per-model RPM limiter: asyncio lock + deque of monotonic timestamps.
     The lock is RELEASED before sleeping, then re-acquired and re-checked, so
@@ -94,14 +103,20 @@ async def complete(
     model = _models[role]
     try:
         return await _acompletion(model, messages=messages, stream=stream, timeout=timeout, **kwargs)
-    except litellm.RateLimitError:
-        logger.warning("upstream 429 from %s despite limiter; backing off once", model)
-        await asyncio.sleep(2.0)
+    except Exception as exc:
+        if not _is_rate_limit(exc):
+            raise
+        # Per-minute quota: a short sleep is useless. Back off long enough for
+        # the window to roll over before the single retry.
+        logger.warning("upstream 429 from %s despite limiter; backing off 20s", model)
+        await asyncio.sleep(20.0)
         try:
             return await _acompletion(
                 model, messages=messages, stream=stream, timeout=timeout, **kwargs
             )
-        except litellm.RateLimitError:
+        except Exception as retry_exc:
+            if not _is_rate_limit(retry_exc):
+                raise
             if settings.ollama_fallback_enabled:
                 logger.warning("falling back to ollama/%s", settings.ollama_model)
                 return await _acompletion(

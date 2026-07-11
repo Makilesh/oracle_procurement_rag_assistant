@@ -11,7 +11,7 @@ from typing import Any, AsyncIterator, Literal
 from core import prompts
 from core.config import settings
 from core.index import IndexStore
-from core.llm import complete, response_text, stream_deltas
+from core.llm import QuotaExceededError, complete, response_text, stream_deltas
 from core.logging import log_stage
 from core.retrieval import RetrievedChunk, retrieve
 from core.sessions import SessionStore, Turn
@@ -221,11 +221,25 @@ async def chat_stream(
     stream = await complete("main", prepared.messages, stream=True, timeout=45.0)
     collected: list[str] = []
     first_token_ms: int | None = None
-    async for delta in stream_deltas(stream):
-        if first_token_ms is None:
-            first_token_ms = round((time.perf_counter() - started) * 1000)
-        collected.append(delta)
-        yield {"delta": delta}
+    try:
+        async for delta in stream_deltas(stream):
+            if first_token_ms is None:
+                first_token_ms = round((time.perf_counter() - started) * 1000)
+            collected.append(delta)
+            yield {"delta": delta}
+    except QuotaExceededError:
+        raise
+    except Exception:
+        # Gemini intermittently drops streaming connections mid-body. Salvage:
+        # keep what we have, or retry once non-streaming if nothing arrived.
+        logger.warning("mid-stream failure, salvaging", exc_info=True)
+        if not collected:
+            response = await complete("main", prepared.messages, timeout=45.0)
+            fallback_answer = response_text(response)
+            collected.append(fallback_answer)
+            yield {"delta": fallback_answer}
+        else:
+            yield {"delta": "\n\n_(stream interrupted — answer may be truncated)_"}
     answer = "".join(collected)
     yield {"sources": prepared.sources, "session_id": session_id}
     await persist_turn(store, session_id, message, answer, prepared.sources, prepared.condensed_query)

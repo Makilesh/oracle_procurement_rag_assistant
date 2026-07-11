@@ -21,8 +21,9 @@ class Settings(BaseSettings):
     # --- models ---
     model_main: str = "gemini/gemini-3.5-flash"  # ⚠ VERIFY against LiteLLM Gemini provider docs
     model_cheap: str = "gemini/gemini-3.1-flash-lite"  # ⚠ VERIFY against LiteLLM Gemini provider docs
-    rpm_main: int = 10
-    rpm_cheap: int = 15
+    # Conservative: observed free-tier 429s at higher rates despite documented limits.
+    rpm_main: int = 6
+    rpm_cheap: int = 10
     embedding_model: str = "BAAI/bge-m3"
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     embedding_device: str = "cpu"  # cuda for local dev only; Docker submission is CPU-only
