@@ -174,17 +174,17 @@ with `Retry-After` · `503` LLM quota exhausted (clean JSON detail, never a stac
   a clean 503 on quota exhaustion. Expected cost: **$0 on the free tier**, and well under
   the $3 guideline on paid keys (a full eval run is ~40 small calls).
 
-  > **Observed free-tier reality:** the project's actual quota for `gemini-3.5-flash`
-  > is **5 RPM / 20 requests per day** (verified in the AI Studio rate-limit dashboard —
-  > far below the commonly cited 1,500 RPD). The architecture absorbs this with an
-  > **automatic model-fallback chain**: every model has a client-side RPM *and* RPD
-  > budget matched to the dashboard, and when the primary's budget is spent (or it
-  > returns 429) the wrapper falls through `MODEL_FALLBACKS` in order
-  > (`gemini-3-flash-preview` → `gemini-2.5-flash` → `gemini-2.5-flash-lite`, all ids
-  > probe-verified) before returning a clean 503. Mid-stream disconnects salvage the
-  > partial answer, and the eval suite marks quota-hit questions "unscored" instead of
-  > crashing. The evaluation below was run with `MODEL_MAIN=gemini/gemini-3.1-flash-lite`
-  > (500 RPD) to keep the scarce 3.5-flash budget for interactive use.
+  > **Observed free-tier reality:** the actual quota for `gemini-3.5-flash` is
+  > **5 RPM / 20 requests per day per project** (verified in the AI Studio rate-limit
+  > dashboard — far below the commonly cited 1,500 RPD). The architecture absorbs this
+  > with **per-(model, key) budgets and a two-dimensional fallback**: every model has a
+  > client-side RPM *and* RPD budget matched to the dashboard, optional key rotation
+  > (`GEMINI_API_KEYS` — each key is its own quota project) exhausts the best model
+  > across **all** keys first, and only then does the wrapper step down the model chain
+  > (`3.5-flash → 3-flash-preview → 2.5-flash → 3.1-flash-lite → 2.5-flash-lite`, all
+  > ids probe-verified) before returning a clean 503. Mid-stream disconnects salvage
+  > the partial answer, and the eval suite marks quota-hit questions "unscored"
+  > instead of crashing.
 - **CPU-only Docker.** The api image installs the CPU torch wheel explicitly; no GPU is
   assumed anywhere in the compose path (GPU is a local-dev-only option via
   `EMBEDDING_DEVICE=cuda`). Models are cached in the `hf_cache` volume across rebuilds.
@@ -205,10 +205,18 @@ the full lifecycle works through the API alone: delete all documents, re-upload 
 
 12 questions over both documents: 8 single-turn factual, 2 multi-turn pairs (follow-up
 depends on the prior turn), 1 cross-document ambiguity probe, and 1 out-of-scope question
-that must be refused. Metrics: **Hit Rate** (retrieved chunk from the expected file within
-expected pages ±1), **Answer Relevance** and **Faithfulness** (LLM-as-judge, 1–5, judged
-only against the retrieved chunks). The suite runs sequentially through the shared rate
-limiter (~40 LLM calls, a few minutes on the free tier).
+that must be refused. Metrics:
+
+- **Hit Rate** — retrieved chunk from the expected file within expected pages ±1 (objective).
+- **Keyword Coverage** — fraction of expected answer keywords present (objective,
+  deterministic — no LLM involved, immune to judge leniency).
+- **Answer Relevance & Faithfulness** — LLM-as-judge (1–5) with a strict calibrated
+  rubric ("5 is rare", claim-by-claim grounding check, unsupported claims listed).
+  The judge runs on a **held-out model** (`MODEL_JUDGE=gemini/gemini-2.5-flash`) that is
+  never the answer model, so the system isn't grading its own output.
+
+The suite runs sequentially through the per-model budgets (~40 LLM calls, a few minutes
+on the free tier).
 
 ```bash
 curl http://localhost:8000/evaluate -H "Authorization: Bearer $TOKEN"
