@@ -38,7 +38,7 @@ class IndexStore:
         chroma_dir.mkdir(parents=True, exist_ok=True)
         self._client = chromadb.PersistentClient(path=str(chroma_dir))
         self._collection = self._client.get_or_create_collection(
-            "kb", metadata={"hnsw:space": "cosine"}
+            "knowledge_base", metadata={"hnsw:space": "cosine"}
         )
         self._registry_path = chroma_dir / "docs.json"
         self._registry: dict[str, dict[str, Any]] = self._load_registry()

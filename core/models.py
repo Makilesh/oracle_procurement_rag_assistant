@@ -49,10 +49,11 @@ def get_reranker() -> "CrossEncoder":
     started = time.perf_counter()
     # bge rerankers emit raw unbounded logits by default; sigmoid normalizes
     # scores to [0,1] so MIN_RERANK_SCORE thresholds are meaningful.
+    # (sentence-transformers >=4 renamed activation_fct -> activation_fn)
     model = CrossEncoder(
         settings.reranker_model,
         device=settings.embedding_device,
-        activation_fct=torch.nn.Sigmoid(),
+        activation_fn=torch.nn.Sigmoid(),
     )
     logger.info(
         "loaded reranker %s on %s in %.1fs",

@@ -26,6 +26,9 @@ if settings.gemini_api_key and not os.environ.get("GEMINI_API_KEY"):
     os.environ["GEMINI_API_KEY"] = settings.gemini_api_key
 
 litellm.suppress_debug_info = True
+# The aiohttp transport intermittently drops Gemini streaming connections
+# ("Server disconnected"); the httpx transport is reliable.
+litellm.disable_aiohttp_transport = True
 
 Role = Literal["main", "cheap"]
 
