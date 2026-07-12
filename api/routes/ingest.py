@@ -3,7 +3,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 
-from api.deps import get_current_user, limiter
+from api.deps import get_admin_user, limiter
 from api.schemas import IngestResponse
 from core.config import settings
 from core.index import IndexStore
@@ -21,8 +21,11 @@ ALLOWED_SUFFIXES = (".pdf", ".txt")
 async def ingest_document(
     request: Request,
     file: UploadFile,
-    user: str = Depends(get_current_user),
+    user: str = Depends(get_admin_user),
 ) -> IngestResponse:
+    """Admin-only: the knowledge base is shared by every user, and ingesting a
+    duplicate filename REPLACES the existing document — a write this global
+    shouldn't be open to any chat user (non-admins get 403)."""
     filename = file.filename or "upload"
     if not filename.lower().endswith(ALLOWED_SUFFIXES):
         raise HTTPException(status_code=422, detail="Only PDF and TXT files are supported")

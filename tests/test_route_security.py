@@ -9,8 +9,23 @@ from core.config import settings
 from core.sessions import SessionStore, scoped_session_id
 from tests.test_sessions import FakeRedis
 
+class FakeIndex:
+    """Just enough index for routes that only read the registry
+    (also satisfies /health, since `app` is shared across test modules)."""
+
+    def list_docs(self) -> list:
+        return []
+
+    def doc_count(self) -> int:
+        return 0
+
+    def chunk_count(self) -> int:
+        return 0
+
+
 store = SessionStore(FakeRedis())  # type: ignore[arg-type]
 app.state.sessions = store
+app.state.index = FakeIndex()
 client = TestClient(app)
 
 
@@ -98,6 +113,19 @@ def test_non_admin_has_no_fallthrough(monkeypatch) -> None:
     headers = _auth_headers()
     _seed("ghost:private-chat")
     assert client.get("/sessions/ghost:private-chat/history", headers=headers).status_code == 404
+
+
+def test_non_admin_cannot_ingest_or_delete_documents(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "admin_usernames", "someone-else")
+    headers = _auth_headers()
+
+    resp = client.post(
+        "/ingest", headers=headers, files={"file": ("doc.txt", b"hello", "text/plain")}
+    )
+    assert resp.status_code == 403
+    assert client.delete("/documents/any-doc-id", headers=headers).status_code == 403
+    # read access to the shared knowledge base is NOT admin-gated
+    assert client.get("/documents", headers=headers).status_code == 200
 
 
 def test_oversized_upload_is_413(monkeypatch) -> None:
