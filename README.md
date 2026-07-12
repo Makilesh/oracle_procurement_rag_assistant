@@ -5,7 +5,7 @@ auth, Redis-persisted multi-turn sessions, hybrid retrieval (dense + BM25 + cros
 reranking) over ChromaDB, Gemini (via LiteLLM) for generation, and a Gradio chat UI with
 streaming answers and source citations.
 
-**Demo video:** _TODO — add link (YouTube unlisted / Loom / Drive)_
+**Demo video:** https://drive.google.com/drive/folders/1Z18QPMWw2v8wz3b9gGcI5rG8hruqbhhx?usp=sharing
 
 ## Why these documents?
 
