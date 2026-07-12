@@ -397,3 +397,27 @@ delete-all → re-ingest lifecycle.
 - **A query-scope router** — auto-suggest a `doc_filter` when the question clearly
   implies one document (the manual filter shipped; the router would cost an extra LLM
   call per message on the current budget).
+
+And what real production traffic would need beyond the assignment's scope:
+
+- **A real identity provider** — OIDC/OAuth2 (e.g. Keycloak/Auth0) instead of the demo
+  user: refresh tokens, revocation, per-user roles replacing the `ADMIN_USERNAMES` list.
+  Secrets from a manager (Vault / cloud KMS) instead of `.env`; TLS at an ingress that
+  also locks down `/metrics`.
+- **Horizontal scaling** — the api is deliberately single-instance today: scaling out
+  needs cross-replica index-cache invalidation (Redis pub/sub), Redis-based RPM pacing
+  (the per-minute limiter is in-process), and incremental BM25 — the full rebuild per
+  ingest is fine at 2K chunks, wrong at 200K.
+- **Managed/replicated stores + backups** — a managed vector DB (or clustered Chroma),
+  Redis with replication, and scheduled snapshots of both volumes; today a lost volume
+  means lost conversations.
+- **Paid LLM tier with SLAs** — plus per-user token/cost accounting; the free-tier
+  budget machinery already gives the accounting hooks.
+- **Tracing & alerting** — OpenTelemetry spans with request-ids correlating logs to
+  metrics, and alert rules on the signals already exported (error rate, quota
+  exhaustion, p95 stage latency).
+- **Background ingestion** — `202 Accepted` + a job-status endpoint for very large
+  documents instead of holding the request (and the ingest lock) open for the whole
+  parse-embed-index cycle.
+- **Session retention policy** — TTL or archival for Redis conversations, which today
+  grow unbounded by design (restart persistence is a demoed feature).
