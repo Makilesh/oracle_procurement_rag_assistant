@@ -27,9 +27,9 @@ limit?" means different things in each):
  Browser ───▶│  Gradio UI (7860)                                            │
              │      │  HTTP (login → JWT, SSE chat stream)                  │
              │      ▼                                                       │
-             │  FastAPI api (8000)  ← stateless: all durable state lives    │
-             │   │                    in Redis + Chroma; local files are    │
-             │   │                    rebuildable caches (BM25, registry)   │
+             │  FastAPI api (8000)  ← thin: durable state lives in Redis    │
+             │   │                    + Chroma; its local files (BM25,      │
+             │   │                    registry) are rebuildable caches      │
              │   ├─ /auth/token ── JWT (HS256, python-jose)                 │
              │   ├─ /chat ─┬─ small-talk router (rule-based)                │
              │   │         ├─ condense follow-up (Gemini flash-lite)        │
@@ -157,7 +157,7 @@ in `ADMIN_USERNAMES`, default `demo`) · `404` unknown session or document · `4
 ## Design decisions
 
 - **Sessions — Redis lists + AOF volume.** Each turn is an append-only JSON entry under
-  `session:{id}`; full history is unbounded (for `/sessions/{id}/history`) while the LLM
+  `session:{user}:{id}`; full history is unbounded (for `/sessions/{id}/history`) while the LLM
   sees a window capped by `HISTORY_WINDOW_TURNS` (6) *and* a ~2000-token budget. AOF +
   named volume means multi-turn context survives `docker-compose down && up`.
 - **Auth — JWT over API key.** `/auth/token` issues HS256 JWTs (python-jose) checked by a
@@ -207,7 +207,7 @@ in `ADMIN_USERNAMES`, default `demo`) · `404` unknown session or document · `4
   to OpenAI/Anthropic/Ollama is a one-line env change. The wrapper enforces free-tier RPM
   limits client-side (sliding-window limiter per model), retries with backoff, and returns
   a clean 503 on quota exhaustion. Expected cost: **$0 on the free tier**, and well under
-  the $3 guideline on paid keys (a full eval run is ~40 small calls).
+  the $3 guideline on paid keys (a full eval run is ~35 small calls).
 
   > **Observed free-tier reality:** the actual quota for `gemini-3.5-flash` is
   > **5 RPM / 20 requests per day per project** (verified in the AI Studio rate-limit
@@ -240,7 +240,7 @@ the full lifecycle works through the API alone: delete all documents, re-upload 
 
 ## Evaluation
 
-12 questions over both documents: 8 single-turn factual, 2 multi-turn pairs (follow-up
+15 questions over both documents: 11 single-turn factual, 2 multi-turn pairs (follow-up
 depends on the prior turn), 1 cross-document ambiguity probe, and 1 out-of-scope question
 that must be refused. Metrics:
 
@@ -252,7 +252,7 @@ that must be refused. Metrics:
   The judge runs on a **held-out model** (`MODEL_JUDGE=gemini/gemini-2.5-flash`) that is
   never the answer model, so the system isn't grading its own output.
 
-The suite runs sequentially through the per-model budgets (~40 LLM calls, a few minutes
+The suite runs sequentially through the per-model budgets (~35 LLM calls, a few minutes
 on the free tier).
 
 ```bash
@@ -348,15 +348,18 @@ honest refusal path with zero LLM calls wasted on hallucination.
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt                      # test/lint tooling (not in the Docker images)
-.venv/Scripts/python -m pytest tests -q -m "not slow"   # unit tests (no API needed)
-.venv/Scripts/python -m pytest tests -q -m slow          # live document-lifecycle test (needs compose up)
+pip install -r requirements-dev.txt   # test/lint tooling (kept out of the Docker images)
+pytest tests -q -m "not slow"         # 52 unit tests (no API or model downloads needed)
+pytest tests -q -m slow               # live document-lifecycle test (needs compose up)
 ```
 
-Covers: auth (issuance, expiry, 401s), session store (window/token budget/delete), RRF
-fusion, the LLM wrapper (limiter, JSON-mode retries, 429→503), the chat pipeline with
-mocked LLM+retrieval (condensation skipped on first turn, invoked on follow-ups, refusal
-below threshold), and the delete-all → re-ingest lifecycle.
+Covers: auth (issuance, expiry, 401s, admin 403s), session store (window/token
+budget/delete), per-user session scoping (one user can't read another's sessions),
+RRF fusion + the document-diversity guard, the LLM wrapper (budgets, key rotation,
+fallback chain, JSON-mode retries, 429→503), the chat pipeline with mocked
+LLM+retrieval (condensation skipped on first turn, invoked on follow-ups, refusal
+below threshold, mid-stream disconnect salvage), the upload size cap (413), and the
+delete-all → re-ingest lifecycle.
 
 ## What I'd improve with more time
 
