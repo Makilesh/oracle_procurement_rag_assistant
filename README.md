@@ -379,7 +379,7 @@ honest refusal path with zero LLM calls wasted on hallucination.
 
 ```bash
 pip install -r requirements-dev.txt   # test/lint tooling (kept out of the Docker images)
-pytest tests -q -m "not slow"         # 52 unit tests (no API or model downloads needed)
+pytest tests -q -m "not slow"         # 70 unit tests (no API or model downloads needed)
 pytest tests -q -m slow               # live document-lifecycle test (needs compose up)
 ```
 
