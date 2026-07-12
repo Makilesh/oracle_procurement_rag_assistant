@@ -32,6 +32,12 @@ LLM_CALLS = Counter(
     ["model", "outcome"],  # ok | rate_limited | day_budget_spent | error
 )
 
+SEMCACHE_LOOKUPS = Counter(
+    "semcache_lookups_total",
+    "Semantic answer-cache lookups by outcome",
+    ["outcome"],  # hit | miss
+)
+
 LLM_QUOTA_EXHAUSTED = Counter(
     "llm_quota_exhausted_total",
     "Requests that exhausted the entire model/key fallback chain",

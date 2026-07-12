@@ -101,7 +101,7 @@ TOKEN=$(curl -s -X POST http://localhost:8000/auth/token \
 | GET | `/health` | no | Service liveness + index counts |
 | POST | `/auth/token` | no | Exchange username/password for a JWT (60 min TTL) |
 | POST | `/ingest` | 🔒 admin | Upload + index a PDF/TXT (no restart needed; shared KB writes are admin-only) |
-| POST | `/chat` | 🔒 | Session-aware chat; SSE stream or JSON |
+| POST | `/chat` | 🔒 | Session-aware chat; SSE stream or JSON; optional `doc_filter` restricts retrieval to one document |
 | GET | `/sessions` | 🔒 admin | List every stored conversation (all users); non-admins get 403 |
 | GET | `/sessions/{id}/history` | 🔒 | Full turn-by-turn history (own sessions; admins: any, by `key`) |
 | DELETE | `/sessions/{id}` | 🔒 | Delete a session (same scoping) |
@@ -127,6 +127,11 @@ curl -X POST http://localhost:8000/chat \
 curl -N -X POST http://localhost:8000/chat \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"session_id":"abc123","message":"What about its thresholds?","stream":true}'
+
+# Chat restricted to one document (doc_filter = a filename from GET /documents)
+curl -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"session_id":"abc123","message":"What is the approval limit?","doc_filter":"richmond_procurement_policy.pdf"}'
 
 # List ALL sessions (admin-only — usernames in ADMIN_USERNAMES; others get 403)
 curl http://localhost:8000/sessions -H "Authorization: Bearer $TOKEN"
@@ -184,6 +189,23 @@ in `ADMIN_USERNAMES`, default `demo`) · `404` unknown session or document · `4
   survive, with a **document-diversity guard** ensuring both documents are represented when
   both clear the gate. If nothing passes, the chatbot **refuses honestly** instead of
   calling the LLM with empty context.
+- **Document filters — user-controlled retrieval scope.** `/chat` accepts an optional
+  `doc_filter` (a filename from `GET /documents`; unknown names get 422) that restricts
+  both retrieval legs — a Chroma `where` clause on the dense side, a doc-id filter applied
+  *before* the top-k cut on the BM25 side — and disables the cross-document diversity
+  guard (single-document context being the point). The UI exposes it as a "📚 Search in"
+  dropdown. This ships the fix proposed in failure analysis #2: ambiguous questions like
+  "what is the approval limit?" can now be scoped to the policy or the manual explicitly.
+- **Semantic answer cache — repeat questions cost zero LLM calls.** The condensed query
+  is already embedded for retrieval; that same vector doubles as a cache key. Answers are
+  stored in Redis keyed by (embedding, doc_filter) under a `kb_version` that every
+  ingest/delete bumps — so any knowledge-base change instantly invalidates the whole
+  cache. A lookup within cosine ≥ 0.97 (near-exact paraphrases only) returns the cached
+  answer + sources in ~100 ms instead of ~20 s, without touching the day's LLM budget.
+  Trade-off (deliberate): the key is the *condensed* query, which already bakes session
+  context into standalone form; truncated/salvaged streams are never cached. Tunables:
+  `SEMCACHE_ENABLED / _THRESHOLD / _TTL_HOURS / _MAX_ENTRIES`; hits/misses exported at
+  `/metrics` (`semcache_lookups_total`).
 - **Reranker — benchmarked, not assumed.** The CPU default is
   `cross-encoder/ms-marco-MiniLM-L-6-v2`: on this corpus it matched
   `BAAI/bge-reranker-v2-m3` exactly on hit rate (93%) and judge scores while cutting
@@ -225,7 +247,8 @@ in `ADMIN_USERNAMES`, default `demo`) · `404` unknown session or document · `4
   `EMBEDDING_DEVICE=cuda`). Models are cached in the `hf_cache` volume across rebuilds.
 - **UI — pure HTTP client.** Gradio Blocks app with zero RAG logic: login panel → JWT in
   state → SSE streaming into the chat window → collapsible per-answer Sources panel →
-  session badge + New Conversation button. 401/429/503 surface as friendly messages.
+  session badge, "📚 Search in" document filter, and New Conversation button. 401/429/503
+  surface as friendly messages.
 
 ### Cold-start bootstrap (`prebuilt_index/`)
 
@@ -363,10 +386,14 @@ delete-all → re-ingest lifecycle.
 
 ## What I'd improve with more time
 
-- **Per-user document scoping** — multi-tenant indexes under the same JWT auth.
+- **Per-user document scoping** — multi-tenant indexes under the same JWT auth. Today the
+  knowledge base is deliberately shared (with admin-gated writes); true multi-tenancy
+  needs owner metadata on every chunk, per-owner BM25, and a prebuilt-index migration.
 - **Entity-aware condensation** — track discussed entities to resolve pronouns when two
   subjects are in play (the classic condensation failure mode).
-- **Semantic caching** — cache condensed-query → answer pairs to cut repeat latency/cost.
 - **Async batch evaluation** — parallelize the eval suite under a token-bucket budget.
-- **Document-type filters** — let the user (or a router) restrict retrieval to the policy
-  or the manual when the question implies one.
+  Deliberately skipped for now: on the free tier the wall time is bound by the 5 RPM
+  quota, not by concurrency, so parallelism buys almost nothing.
+- **A query-scope router** — auto-suggest a `doc_filter` when the question clearly
+  implies one document (the manual filter shipped; the router would cost an extra LLM
+  call per message on the current budget).

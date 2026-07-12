@@ -13,7 +13,9 @@ from core import metrics, prompts
 from core.index import IndexStore
 from core.llm import QuotaExceededError, complete, response_text, stream_deltas
 from core.logging import log_stage
+from core.models import embed_texts
 from core.retrieval import RetrievedChunk, retrieve
+from core.semcache import SemanticCache
 from core.sessions import SessionStore, Turn
 
 logger = logging.getLogger("chat")
@@ -136,15 +138,23 @@ async def condense_query(history: list[Turn], message: str) -> str:
 
 @dataclass
 class PreparedTurn:
-    kind: Literal["canned", "refusal", "rag"]
-    answer: str | None = None  # set for canned/refusal
+    kind: Literal["canned", "refusal", "rag", "cached"]
+    answer: str | None = None  # set for canned/refusal/cached
     messages: list[dict[str, str]] = field(default_factory=list)  # set for rag
     sources: list[dict[str, Any]] = field(default_factory=list)
     condensed_query: str | None = None
+    # carried so a successful rag answer can be stored in the semantic cache
+    query_embedding: list[float] | None = None
+    doc_filter: str | None = None
 
 
 async def prepare_turn(
-    index: IndexStore, store: SessionStore, session_id: str, message: str
+    index: IndexStore,
+    store: SessionStore,
+    session_id: str,
+    message: str,
+    doc_filter: str | None = None,
+    cache: SemanticCache | None = None,
 ) -> PreparedTurn:
     canned = route_small_talk(message)
     if canned is not None:
@@ -153,7 +163,30 @@ async def prepare_turn(
 
     history = await store.window(session_id)
     condensed = await condense_query(history, message) if history else message
-    chunks = await retrieve(index, condensed)
+
+    # Semantic cache: the condensed query is standalone, so its embedding is a
+    # stable key. Embed once here and reuse the vector for dense retrieval.
+    query_embedding: list[float] | None = None
+    if cache is not None:
+        embed_started = time.perf_counter()
+        query_embedding = (await embed_texts([condensed]))[0]
+        metrics.STAGE_LATENCY.labels("embed").observe(time.perf_counter() - embed_started)
+        hit = await cache.lookup(query_embedding, doc_filter)
+        if hit is not None:
+            return PreparedTurn(
+                kind="cached",
+                answer=hit["answer"],
+                sources=hit["sources"],
+                condensed_query=condensed,
+                doc_filter=doc_filter,
+            )
+
+    chunks = await retrieve(
+        index,
+        condensed,
+        filenames=[doc_filter] if doc_filter else None,
+        query_embedding=query_embedding,
+    )
     if not chunks:
         return PreparedTurn(kind="refusal", answer=prompts.REFUSAL_RESPONSE, condensed_query=condensed)
     return PreparedTurn(
@@ -161,6 +194,8 @@ async def prepare_turn(
         messages=_answer_messages(chunks, history, message),
         sources=_sources_payload(chunks),
         condensed_query=condensed,
+        query_embedding=query_embedding,
+        doc_filter=doc_filter,
     )
 
 
@@ -193,21 +228,42 @@ async def persist_turn(
     )
 
 
+async def _store_in_cache(cache: SemanticCache | None, prepared: PreparedTurn, answer: str) -> None:
+    """Cache a successful rag answer (never canned/refusal — they cost no LLM)."""
+    if cache is None or prepared.kind != "rag" or prepared.query_embedding is None:
+        return
+    await cache.store(
+        prepared.query_embedding,
+        prepared.condensed_query or "",
+        prepared.doc_filter,
+        answer,
+        prepared.sources,
+    )
+
+
 async def chat_once(
-    index: IndexStore, store: SessionStore, session_id: str, message: str
+    index: IndexStore,
+    store: SessionStore,
+    session_id: str,
+    message: str,
+    doc_filter: str | None = None,
+    cache: SemanticCache | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Non-streaming chat: returns (answer, sources) and persists the turn."""
     started = time.perf_counter()
-    prepared = await prepare_turn(index, store, session_id, message)
-    if prepared.kind in ("canned", "refusal"):
+    prepared = await prepare_turn(index, store, session_id, message, doc_filter, cache)
+    if prepared.kind in ("canned", "refusal", "cached"):
         answer = prepared.answer or ""
-        await persist_turn(store, session_id, message, answer, [], prepared.condensed_query)
-        return answer, []
+        await persist_turn(
+            store, session_id, message, answer, prepared.sources, prepared.condensed_query
+        )
+        return answer, prepared.sources
 
     generate_started = time.perf_counter()
     response = await complete("main", prepared.messages, timeout=45.0)
     metrics.STAGE_LATENCY.labels("generate").observe(time.perf_counter() - generate_started)
     answer = response_text(response)
+    await _store_in_cache(cache, prepared, answer)
     await persist_turn(store, session_id, message, answer, prepared.sources, prepared.condensed_query)
     log_stage(
         logger,
@@ -220,23 +276,31 @@ async def chat_once(
 
 
 async def chat_stream(
-    index: IndexStore, store: SessionStore, session_id: str, message: str
+    index: IndexStore,
+    store: SessionStore,
+    session_id: str,
+    message: str,
+    doc_filter: str | None = None,
+    cache: SemanticCache | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Streaming chat: yields {"delta": ...} events then a final
     {"sources": [...], "session_id": ...} event; persists the turn at the end."""
     started = time.perf_counter()
-    prepared = await prepare_turn(index, store, session_id, message)
+    prepared = await prepare_turn(index, store, session_id, message, doc_filter, cache)
 
-    if prepared.kind in ("canned", "refusal"):
+    if prepared.kind in ("canned", "refusal", "cached"):
         answer = prepared.answer or ""
         yield {"delta": answer}
-        yield {"sources": [], "session_id": session_id}
-        await persist_turn(store, session_id, message, answer, [], prepared.condensed_query)
+        yield {"sources": prepared.sources, "session_id": session_id}
+        await persist_turn(
+            store, session_id, message, answer, prepared.sources, prepared.condensed_query
+        )
         return
 
     stream = await complete("main", prepared.messages, stream=True, timeout=45.0)
     collected: list[str] = []
     first_token_ms: int | None = None
+    salvaged = False
     try:
         async for delta in stream_deltas(stream):
             if first_token_ms is None:
@@ -272,8 +336,11 @@ async def chat_stream(
             collected.append(fallback_answer)
             yield {"delta": fallback_answer}
         else:
+            salvaged = True  # possibly truncated — never cache it
             yield {"delta": "\n\n_(stream interrupted — answer may be truncated)_"}
     answer = "".join(collected)
+    if not salvaged:
+        await _store_in_cache(cache, prepared, answer)
     yield {"sources": prepared.sources, "session_id": session_id}
     await persist_turn(store, session_id, message, answer, prepared.sources, prepared.condensed_query)
     log_stage(

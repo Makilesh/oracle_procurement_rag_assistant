@@ -97,9 +97,31 @@ def _sources_block(sources: list[dict[str, Any]]) -> str:
     )
 
 
+ALL_DOCUMENTS = "All documents"
+
+
+def _document_choices(token: str) -> list[str]:
+    """Populate the 'Search in' dropdown from the backend's document list."""
+    try:
+        resp = httpx.get(
+            f"{API_URL}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return [ALL_DOCUMENTS] + [d["filename"] for d in resp.json()["documents"]]
+    except httpx.HTTPError:
+        pass
+    return [ALL_DOCUMENTS]
+
+
 def login(username: str, password: str) -> tuple[Any, ...]:
     def fail(msg: str) -> tuple[Any, ...]:
-        return None, "", [], gr.update(visible=True), gr.update(visible=False), f"⚠️ {msg}", gr.update()
+        return (
+            None, "", [],
+            gr.update(visible=True), gr.update(visible=False), f"⚠️ {msg}",
+            gr.update(), gr.update(),
+        )
 
     if not username or not password:
         return fail("Enter username and password.")
@@ -125,6 +147,7 @@ def login(username: str, password: str) -> tuple[Any, ...]:
         gr.update(visible=True),
         "",
         gr.update(choices=[session_id], value=session_id),
+        gr.update(choices=_document_choices(token), value=ALL_DOCUMENTS),
     )
 
 
@@ -190,7 +213,11 @@ def _stream_worker(payload: dict[str, Any], token: str, events: "queue.Queue") -
 
 
 def respond(
-    message: str, history: list[Message], token: str | None, session_id: str
+    message: str,
+    history: list[Message],
+    token: str | None,
+    session_id: str,
+    doc_filter: str | None = None,
 ) -> Iterator[tuple[list[Message], str]]:
     message = (message or "").strip()
     if not message:
@@ -213,10 +240,14 @@ def respond(
     set_answer('<span class="thinking">🔍 Searching the knowledge base…</span>')
     yield history, ""
 
+    payload: dict[str, Any] = {"session_id": session_id, "message": message, "stream": True}
+    if doc_filter and doc_filter != ALL_DOCUMENTS:
+        payload["doc_filter"] = doc_filter
+
     events: queue.Queue = queue.Queue()
     threading.Thread(
         target=_stream_worker,
-        args=({"session_id": session_id, "message": message, "stream": True}, token, events),
+        args=(payload, token, events),
         daemon=True,
     ).start()
 
@@ -305,6 +336,13 @@ def build_app() -> gr.Blocks:
                     allow_custom_value=True,  # paste an old session id to restore it
                     info="Switch back to a previous conversation — history is kept server-side",
                 )
+                doc_filter_dd = gr.Dropdown(
+                    choices=[ALL_DOCUMENTS],
+                    value=ALL_DOCUMENTS,
+                    label="📚 Search in",
+                    scale=2,
+                    info="Restrict answers to one document",
+                )
                 new_btn = gr.Button("🔄 New Conversation", scale=0, size="sm")
             chatbot = gr.Chatbot(
                 height="62vh",
@@ -324,7 +362,7 @@ def build_app() -> gr.Blocks:
 
         login_outputs = [
             token_state, session_state, sessions_state,
-            login_panel, chat_panel, login_error, session_picker,
+            login_panel, chat_panel, login_error, session_picker, doc_filter_dd,
         ]
         login_btn.click(login, inputs=[username, password], outputs=login_outputs)
         password.submit(login, inputs=[username, password], outputs=login_outputs)
@@ -342,7 +380,7 @@ def build_app() -> gr.Blocks:
             outputs=[session_state, sessions_state, chatbot],
         )
 
-        chat_inputs = [msg_box, chatbot, token_state, session_state]
+        chat_inputs = [msg_box, chatbot, token_state, session_state, doc_filter_dd]
         send_btn.click(respond, inputs=chat_inputs, outputs=[chatbot, msg_box])
         msg_box.submit(respond, inputs=chat_inputs, outputs=[chatbot, msg_box])
     return demo
